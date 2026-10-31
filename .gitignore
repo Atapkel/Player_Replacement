@@ -1,0 +1,6 @@
+# Raw and processed data are too big for git; see README for how to download
+data/
+
+__pycache__/
+.ipynb_checkpoints/
+.venv/
