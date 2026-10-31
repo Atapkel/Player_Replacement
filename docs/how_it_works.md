@@ -416,6 +416,56 @@ final answer.
 
 ---
 
+## Part 9 · Club goals and transfer plans
+
+So far the club sold one player and wanted a like-for-like replacement. Real clubs often sell several players in one
+window, with one budget, and they don't always want the same thing. The project now handles both (notebook 06).
+
+### The three goals
+
+- **Like-for-like** (`replace`, the default): everything described above. Style filter, then rank by predicted rating.
+- **Strengthen the squad** (`squad`): no style filter. Simply the candidate with the best predicted rating in two years.
+  Useful when the sold player didn't fit the team anyway.
+- **Make money** (`profit`): rank by **expected profit**. This needs two new models, trained with the same no-leakage rule
+  as the growth model:
+  - a **regression** model that predicts the player's **market value in two years** (typical error 39%, against 50% for
+    "the value stays the same");
+  - a **classification** model that predicts the **chance he is still in the game** in two years (AUC 0.78). A player who
+    disappears can't be sold on, so we count his resale as €0. The model is well calibrated: when it says 30%, about 30%
+    really stay; when it says 95%, about 95% do. Below 50% the Finder shows a "high drop-out risk" flag.
+
+  Expected profit = chance of staying × predicted value in two years − price. In the 750-case backtest, profit mode earned
+  about **€5.5M per signing** two years later. That ties with the simple rule "buy the highest potential" (€5.3M), so it
+  isn't better on money alone, but its signings are better replacements (49% vs 44%) and disappear less often.
+
+### Several players, one budget: the transfer plan
+
+Imagine Brighton in summer 2022: they sold both Bissouma and Cucurella and have €45M for the two replacements. The simple
+approach is to split the money by hand (a share for each position) and choose each replacement separately. But money can't
+move between positions that way.
+
+The **transfer plan** (`ReplacementFinder.plan`) solves the whole problem at once with **integer programming**, using
+scipy's `milp`. For every pair (sold player, candidate) there is a variable that is 1 if we buy that candidate, 0 if not.
+The rules are written as constraints: exactly one signing for each sold player; nobody bought twice; total price within
+the budget. The solver then finds the combination with the largest total gain (for like-for-like: predicted rating minus
+the sold player's rating).
+
+For each sold player, the optimizer considers the best candidates plus every "best for its price" candidate (nobody
+cheaper has a higher gain). That guarantees the plan is never worse, on predictions, than splitting the budget by hand.
+In the backtest (450 clubs each), the joint plan produced real replacements **65% vs 61%** of the time when two players
+were sold, and **67% vs 60%** with three. Both differences are significant, and the advantage grows with the number of
+players. Our first optimizer lost to the simple method; the backtest showed it, which is how we found and fixed the bug.
+
+### Focus: telling the plan what matters
+
+A club can say "this summer, improve the midfield" (or attack, or defense). In the plan, the gain of the focus positions
+counts double, so the optimizer is willing to spend more there. For Brighton with €45M: without a focus it buys
+Maksimović (€20.5M) and David Raum (€23.5M); with a midfield focus, Bennacer (€33.5M) and a cheap 18-year-old left-back;
+with a defense focus, Renan Lodi (€36.5M) at left-back and a cheaper midfielder. The focus is the club's wish, not a
+prediction, so there is nothing to test against reality, only that the money really moves (which a test checks).
+
+---
+
 ## Z. The whole thing in one breath
 
 FIFA ratings (10 million weekly rows) are cleaned to one end-of-season row per player and season. When a club sells a
@@ -448,6 +498,9 @@ the system better.
 | R–W | Replay 750 decisions, compare methods, bootstrap | `src/backtest.py`, notebook 04 |
 | X | The dropped value model | `value_residuals`, notebook 03 |
 | Y | Automatic rule checks | `tests/test_finder.py` |
+| 9 | Value-in-2-years and stay models | `train_future_value_model`, `train_stay_model` |
+| 9 | Goals (replace, squad, profit) | `ReplacementFinder.goal_pool`, `recommend(goal=...)` |
+| 9 | Transfer plan with one budget and a focus | `ReplacementFinder.plan`, `examples/plan_transfers.py`, notebook 06 |
 
 ### Our example in numbers
 

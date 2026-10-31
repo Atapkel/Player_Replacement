@@ -1,10 +1,17 @@
 # Replacement Finder: Moneyball scouting with machine learning
 
-**We sell a player. Who can replace him cheaply, in the same playing style, and still be good in two years?**
+**We sell one or several players. Who can replace them within our budget, for our goal, and still be good in two years?**
 
-A decision-support tool for a football club with a limited budget. Given the player a club is selling, the
-budget, the wage cap and an age limit, it recommends replacements that (1) play in a similar style and (2) are
-predicted to be the strongest in two years. It is validated by a historical backtest over 750 transfer decisions.
+A decision-support tool for a football club with a limited budget. Given the players a club is selling, the budget,
+the wage cap and an age limit, it recommends replacements for the club's goal:
+
+- **like-for-like:** same playing style, strongest in two years;
+- **strengthen the squad:** strongest in two years, any style;
+- **make money:** highest expected resale profit;
+
+optionally with a **focus** on attack, midfield or defense. Several sold players are replaced together by an
+**optimizer** that splits one shared budget. Everything is validated by historical backtests over hundreds of transfer
+decisions.
 
 AI Essentials, Lab work #2, Scenario 3 (Moneyball 2.0) with elements of Scenario 5 (a product for a sporting director).
 
@@ -33,6 +40,16 @@ or looser success definitions, and with a 20% smaller budget.
 | Real Madrid sells Casemiro, €44M | Palhinha (best style match) or Højbjerg | Real paid ~€80M+ for Tchouaméni; **Fulham bought Palhinha that summer** |
 | Brentford loses Eriksen, €15M | Denis Suárez or Kahveci (needed a stricter style filter) | No like-for-like replacement |
 
+**Club goals and transfer plans** (notebook 06):
+
+| | Result |
+|---|---|
+| Transfer plan (optimizer) vs splitting the budget by hand, clubs selling 2 / 3 players | **65% vs 61%** / **67% vs 60%** real replacements (+4 and +7 points, both significant) |
+| Goal "make money": real profit per signing two years later (left the game = €0) | **€5.45M**, ties "highest potential" (€5.29M), better replacements (49% vs 44%), fewer drop-outs (5% vs 7%) |
+| Stay model (still in the game in 2 years) | AUC 0.78 vs 0.69 for "rating only"; well calibrated |
+| Value-in-2-years model | Typical error 39% vs 50% for "value stays the same" |
+| Brighton 2022 sells Bissouma + Cucurella, €45M | No focus: Maksimović + David Raum · focus midfield: Bennacer + Livramento · focus defense: Bellegarde + Renan Lodi |
+
 ## Main findings, including the negative ones
 
 1. **A growth model beats EA's "potential" at predicting who will improve.** Gradient boosting predicts the rating
@@ -48,6 +65,11 @@ or looser success definitions, and with a 20% smaller budget.
    recognizes the same player one season later as the #1 match among 6,000+ midfielders 86% of the time.
 5. **Our first design was wrong, and the backtest showed it.** Mixing 40% style similarity into the score gave only 36%
    success. Using style as a *filter* and the growth model for *ranking* gave 56%.
+6. **Joint optimization beats splitting the budget, and the gain grows with the number of players sold.** Our first
+   optimizer *lost*; the backtest exposed it (its predicted quality was below the simple method's), and the fix ("best for
+   its price" options for every player) made it win.
+7. **For pure profit, our model is only as good as the best simple rule.** Buying the highest EA potential earns about
+   as much; the model's advantage is better replacements and fewer drop-outs.
 
 ## How it works
 
@@ -63,8 +85,16 @@ style-matching candidates
         │  rank by predicted rating in 2 years
         │  (gradient boosting, trained only on seasons known at the decision date)
         ▼
-shortlist + explanation + risk flags (bench player, weaker league, contract ending, little growth left)
+shortlist + explanation + risk flags (bench player, weaker league, contract ending, little growth left, high drop-out risk)
 ```
+
+**Goals.** `replace` (above) · `squad`: no style filter, rank by predicted rating · `profit`: rank by expected profit =
+P(still playing in 2 years) × predicted value in 2 years − price. Two extra gradient boosting models make the profit
+mode possible: a regressor for the value in 2 years and a classifier for staying in the game.
+
+**Transfer plans.** For several sold players, an integer program (`scipy.optimize.milp`) chooses exactly one signing per
+sold player, never the same player twice, total price ≤ budget, and maximizes Σ weight × gain. A focus ("attack",
+"midfield", "defense") doubles the weight of those positions, so more of the budget goes there.
 
 ## Data
 
@@ -79,8 +109,8 @@ The analysis uses the end-of-season snapshot, about 20–24k players per season.
 src/
   download_data.py     download the Kaggle dataset (no login needed)
   prepare_data.py      5.6 GB CSV -> 29 MB parquet (chunked, ~2.5 min, <2 GB RAM)
-  finder.py            the Replacement Finder: style similarity, growth model, scoring, risk flags
-  backtest.py          historical backtest and bootstrap confidence intervals
+  finder.py            the Replacement Finder: style similarity, growth / value / stay models, goals, transfer plans
+  backtest.py          historical backtests (single player, profit, transfer plans)
   plot_style.py        shared chart style
 notebooks/
   01_data_overview.ipynb           what's in the data, quality checks, pitfalls (selection bias, confounding, survivorship)
@@ -88,12 +118,14 @@ notebooks/
   03_growth_and_value_models.ipynb growth model vs baselines; why EA prices hide no bargains
   04_backtest.ipynb                750 historical decisions vs simple rules, robustness checks
   05_recommendations.ipynb         summer 2022 decisions for Brighton, Real Madrid, Brentford
+  06_goals_and_transfer_plans.ipynb profit and stay models, profit backtest, joint plans vs split budget, focus
 app.py                 Streamlit demo for a sporting director
 examples/
   find_replacement.py  ask for a shortlist from the command line
+  plan_transfers.py    replace several sold players with one budget, for a goal and focus
   check_predictions.py test the growth model against real FIFA 23 ratings it never saw
 tests/
-  test_finder.py       16 automatic checks (limits, roles, no data leakage, reproducibility)
+  test_finder.py       24 automatic checks (limits, roles, no data leakage, reproducibility, plans, focus)
 docs/
   how_it_works.md           the whole system explained from A to Z, with one example followed through
   how_it_works_ru.md        the same explanation in Russian
@@ -113,11 +145,12 @@ docs/
 pip install -r requirements.txt
 python src/download_data.py      # ~6 GB into data/raw/
 python src/prepare_data.py       # -> data/processed/players.parquet
-jupyter lab notebooks/           # run 01 -> 05 in order (04 caches its backtest, ~3 min first run)
+jupyter lab notebooks/           # run 01 -> 06 in order (04 and 06 cache their backtests)
 streamlit run app.py             # interactive demo
 python examples/find_replacement.py --player "Y. Bissouma" --club "Brighton & Hove Albion" --budget 25
+python examples/plan_transfers.py --club "Brighton & Hove Albion" --sell "Y. Bissouma" --sell "Cucurella" --budget 45 --focus midfield
 python examples/check_predictions.py   # predictions vs reality on unseen data
-pytest -v tests/                       # 16 automatic checks
+pytest -v tests/                       # 24 automatic checks
 ```
 
 See `docs/how_to_test.md` for a full guide with sample outputs.
@@ -140,7 +173,9 @@ See `docs/how_to_test.md` for a full guide with sample outputs.
 
 - Ratings and values are EA's opinion, not match events or real fees.
 - FIFA 23 ends in January 2023, so the last backtest season and the 2022 reality check are mid-season.
-- The tool replaces one player at a time; it doesn't plan a whole squad or a long-term strategy.
+- Plans give one signing per sold player; squad depth, the total wage bill and the starting eleven are not modelled.
+- The focus weight (×2) expresses the club's wish; it is a choice, not something learned from data.
+- Profit is measured in EA values, which react far more slowly than real fees.
 - Rare player types (e.g. classic playmakers) need a stricter style filter, chosen by a human.
 
 ## Use of AI tools

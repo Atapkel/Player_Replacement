@@ -111,3 +111,83 @@ def bootstrap_difference(picks: pd.DataFrame, metric: str, a: str, b: str,
     rng = np.random.default_rng(seed)
     boots = rng.choice(diff, size=(n_boot, len(diff)), replace=True).mean(axis=1)
     return diff.mean(), *np.percentile(boots, [2.5, 97.5])
+
+
+# ---------------------------------------------------------------- club goals and multi-player plans
+
+def pick_most_profit(pool: pd.DataFrame, n: int) -> pd.DataFrame:
+    """The 'profit' goal: highest expected resale profit (value in 2 years × chance he still plays − price)."""
+    return pool.nlargest(n, "expected_profit")
+
+
+def realized_profit(picks: pd.DataFrame) -> pd.Series:
+    """Value two seasons later minus the price paid, in €M.
+
+    Conservative: a player who left the game counts as resold for nothing (his whole price is lost).
+    """
+    return (picks.value_eur_2y.fillna(0) - picks.value_eur) / 1e6
+
+
+def sample_plan_cases(season: pd.DataFrame, n_cases: int, k: int, seed: int) -> list[list[int]]:
+    """Clubs that sell k established players at once (same rules as `sample_cases`)."""
+    eligible = season[season.overall.between(70, 84) & season.age.between(22, 30)
+                      & (season.league_level == 1) & (season.value_eur > 0)]
+    rng = np.random.default_rng(seed)
+    clubs = eligible.groupby("club_team_id").player_id.apply(list)
+    clubs = clubs[clubs.str.len() >= k]
+    chosen = rng.choice(len(clubs), size=min(n_cases, len(clubs)), replace=False)
+    return [list(rng.choice(clubs.iloc[i], size=k, replace=False)) for i in chosen]
+
+
+def split_budget_picks(finder: ReplacementFinder, sold_ids: list[int], budget_factor: float,
+                       goal: str, max_age: float, level_drop: float) -> list[int] | None:
+    """The simple alternative to a joint plan: give every sold player his own share of the
+    budget (budget_factor × his value) and pick the best candidate for each one separately."""
+    picked = []
+    budget = budget_factor * sum(finder.player(i).value_eur for i in sold_ids)
+    for sid in sold_ids:
+        sold = finder.player(sid)
+        # Same candidate pool as the joint plan (built with the whole budget), then this player's share
+        pool = finder.goal_pool(sid, budget, goal, wage_cap=sold.wage_eur,
+                                max_age=max_age, min_overall=sold.overall - level_drop)
+        pool = pool[(pool.value_eur <= budget_factor * sold.value_eur) & ~pool.player_id.isin(picked)]
+        if pool.empty:
+            return None
+        picked.append(int(pool.gain.idxmax()))
+    return picked
+
+
+def run_plan_backtest(players: pd.DataFrame, decision_versions=(19, 20, 21), n_cases: int = 150,
+                      k: int = 2, budget_factor: float = 0.6, goal: str = "replace", max_age: float = 28,
+                      level_drop: float = 12, seed: int = 0, finders: dict | None = None) -> pd.DataFrame:
+    """Clubs sell k players at once with one shared budget (budget_factor × their total value).
+
+    Compares the joint plan (integer program) with splitting the budget and choosing separately.
+    Only cases where both methods find a solution are kept, so they are compared on the same cases.
+    Returns one row per (case, method, sold player) with the pick's outcome two seasons later.
+    """
+    future = growth_pairs(players).set_index(["player_id", "fifa_version"])[["overall_2y", "value_eur_2y"]]
+    rows = []
+    for version in decision_versions:
+        finder = (finders or {}).get(version) or ReplacementFinder(players, version)
+        for case_no, sold_ids in enumerate(sample_plan_cases(finder.season, n_cases, k, seed + version)):
+            budget = budget_factor * sum(finder.player(i).value_eur for i in sold_ids)
+            try:
+                plan = finder.plan(sold_ids, budget, goal=goal, max_age=max_age, level_drop=level_drop)
+            except ValueError:
+                continue
+            split = split_budget_picks(finder, sold_ids, budget_factor, goal, max_age, level_drop)
+            if split is None:
+                continue
+            methods = {"Joint plan (optimizer)": plan.player_id.tolist(), "Split budget, choose separately": split}
+            for method, picks in methods.items():
+                for sid, pid in zip(sold_ids, picks):
+                    rows.append({"version": version, "case": f"{version}-{case_no}", "method": method,
+                                 "sold_id": sid, "sold_overall": finder.player(sid).overall,
+                                 "player_id": pid, "value_eur": finder.player(pid).value_eur,
+                                 "pred_overall_2y": finder.player(pid).pred_overall_2y, "budget": budget})
+    picks = pd.DataFrame(rows).join(future, on=["player_id", "version"])
+    picks["still_in_game"] = picks.overall_2y.notna()
+    picks["success"] = picks.still_in_game & (picks.overall_2y >= picks.sold_overall - 3)
+    picks["profit_m"] = realized_profit(picks)
+    return picks

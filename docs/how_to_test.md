@@ -83,6 +83,35 @@ little growth left). The list is sorted by `in 2y`, among players whose style is
 | `--cheaper` | 0 = best future rating, up to 0.5 = prefer cheaper players | 0 |
 | `-n` | shortlist length | 10 |
 
+## 2b. Transfer plans: several players, one budget, a goal and a focus
+
+`examples/plan_transfers.py` replaces several sold players at once. An optimizer splits the shared budget.
+
+```bash
+# Brighton sold Bissouma and Cucurella in summer 2022. €45M for both replacements:
+python examples/plan_transfers.py --club "Brighton & Hove Albion" --sell "Y. Bissouma" --sell "Cucurella" --budget 45
+
+# Same, but the club wants to strengthen its midfield first:
+python examples/plan_transfers.py --club "Brighton & Hove Albion" --sell "Y. Bissouma" --sell "Cucurella" --budget 45 --focus midfield
+
+# Same, but the goal is to make money (buy players whose value should grow):
+python examples/plan_transfers.py --club "Brighton & Hove Albion" --sell "Y. Bissouma" --sell "Cucurella" --budget 45 --goal profit
+```
+
+**Sample output (focus midfield):**
+
+```
+   replaces        player  age        club pos  now  in 2y  price value 2y stays  style        risks
+Y. Bissouma   I. Bennacer   23       Milan CDM   81   80.9 €33.5M   €28.4M  100%   0.66 bench player
+  Cucurella T. Livramento   18 Southampton  RB   74   76.9  €8.5M   €16.1M   98%   0.74 bench player
+
+Spent €42M of €45M; expected profit in 2 years €1.98M; average predicted rating in 2 years 78.9
+```
+
+Goals: `replace` (same style, the default), `squad` (any style, best rating in 2 years), `profit` (expected resale
+profit). Focus: `attack`, `midfield`, `defense` (those positions count double). In the app, choose
+**"Transfer plan: several players"** in the sidebar.
+
 ## 3. Check the predictions against reality
 
 ```bash
@@ -128,7 +157,7 @@ development is the hardest thing to predict. That's a good answer if the teacher
 pytest -v tests/
 ```
 
-16 checks run in about 15 seconds. They test that the Finder follows its own rules:
+24 checks run in about a minute. They test that the Finder follows its own rules:
 
 | Check | What it proves |
 |---|---|
@@ -139,8 +168,14 @@ pytest -v tests/
 | A player is most similar to himself | The similarity measure is mathematically sane (cosine = 1 with itself) |
 | **No data leakage** | Deleting every season after the decision date doesn't change a single prediction. If the model used the future, this test would fail |
 | Reproducible | Training twice gives exactly the same shortlist |
+| Profit columns make sense | Stay probability between 0 and 1; expected profit = stay chance × value in 2 years − price |
+| Plan respects the budget (3 goals) | One signing per sold player, total within budget, nobody bought twice |
+| Same role sold twice | Two sold players of the same role never get the same replacement |
+| Focus moves money | With focus "midfield", more is spent on the midfielder's replacement (and the same for defense) |
+| Joint plan ≥ split budget | The optimizer never predicts worse than choosing each player with his own budget share |
+| Impossible budget | A budget too small for any combination gives a clear error |
 
-Expected result: `16 passed`.
+Expected result: `24 passed`.
 
 ## Experiments to prepare for the defense
 

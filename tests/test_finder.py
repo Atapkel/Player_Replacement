@@ -103,3 +103,63 @@ def test_results_are_reproducible(players, finder):
     first = finder.recommend(sold.player_id, budget=25e6, n=10).player_id.tolist()
     second = again.recommend(sold.player_id, budget=25e6, n=10).player_id.tolist()
     assert first == second
+
+
+# ---------------------------------------------------------------- club goals and multi-player plans
+
+def brighton_sales(finder):
+    return [sold_player(finder, "Y. Bissouma", "Brighton & Hove Albion").player_id,
+            sold_player(finder, "Cucurella", "Brighton & Hove Albion").player_id]
+
+
+def test_profit_columns_make_sense(finder):
+    s = finder.season
+    assert s.p_stay.between(0, 1).all()
+    assert (s.pred_value_2y > 0).all()
+    assert np.allclose(s.expected_resale, s.p_stay * s.pred_value_2y)
+    assert np.allclose(s.expected_profit.dropna(), (s.expected_resale - s.value_eur).dropna())
+
+
+@pytest.mark.parametrize("goal", ["replace", "squad", "profit"])
+def test_plan_respects_budget_one_signing_per_player(finder, goal):
+    sold_ids = brighton_sales(finder)
+    plan = finder.plan(sold_ids, budget=45e6, goal=goal)
+    assert len(plan) == len(sold_ids)
+    assert plan.value_eur.sum() <= 45e6
+    assert plan.player_id.is_unique, "the same player was bought twice"
+    assert set(plan.sold_id) == set(sold_ids)
+
+
+def test_plan_never_buys_same_player_twice_for_same_role(finder):
+    s = finder.season
+    first = s[(s.overall >= 75) & (s.league_level == 1) & (s.value_eur > 0)]
+    club, role = first.groupby(["club_team_id", "role"], observed=True).size().pipe(lambda c: c[c >= 2]).index[0]
+    sold_ids = first[(first.club_team_id == club) & (first.role == role)].player_id.tolist()[:2]
+    plan = finder.plan(sold_ids, budget=0.6 * sum(finder.player(i).value_eur for i in sold_ids))
+    assert plan.player_id.is_unique
+
+
+def test_focus_moves_money_to_the_focus_position(finder):
+    bissouma, cucurella = brighton_sales(finder)
+    spend = lambda plan, sid: plan.loc[plan.sold_id == sid, "value_eur"].iat[0]
+    neutral = finder.plan([bissouma, cucurella], budget=45e6)
+    midfield = finder.plan([bissouma, cucurella], budget=45e6, focus="midfield")
+    defense = finder.plan([bissouma, cucurella], budget=45e6, focus="defense")
+    assert spend(midfield, bissouma) >= spend(neutral, bissouma)
+    assert spend(defense, cucurella) >= spend(neutral, cucurella)
+
+
+def test_joint_plan_is_never_worse_than_splitting_the_budget(finder):
+    """The optimizer must reach at least the predicted gain of choosing each player separately."""
+    from backtest import split_budget_picks
+    sold_ids = brighton_sales(finder)
+    budget = 0.6 * sum(finder.player(i).value_eur for i in sold_ids)
+    plan = finder.plan(sold_ids, budget=budget, max_age=28)
+    split = split_budget_picks(finder, sold_ids, 0.6, "replace", max_age=28, level_drop=12)
+    predicted = lambda ids: sum(finder.player(i).pred_overall_2y for i in ids)
+    assert predicted(plan.player_id) >= predicted(split) - 1e-9
+
+
+def test_plan_reports_an_impossible_budget(finder):
+    with pytest.raises(ValueError):
+        finder.plan(brighton_sales(finder), budget=1e5)
